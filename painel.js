@@ -165,7 +165,7 @@ function pintarEditor(g, nova) {
           return `<div class="pessoa" data-p="${esc(p.id)}">
             <div class="pessoa-cab" data-abre>
               <div class="info"><b>${esc(p.nome)}</b><span>${esc(foneBR(p.whats))}${p.email ? ' • ' + esc(p.email) : ''}</span></div>
-              <div class="estado"><span class="ponto ${p.finalizadaEm ? 'ok' : 'ouro'}"></span>${p.finalizadaEm ? `Enviou em ${dataCurta(p.finalizadaEm)}` : 'Escolhendo'} • ${ids.length} ${ids.length === 1 ? 'foto' : 'fotos'}</div>
+              <div class="estado"><span class="ponto ${p.finalizadaEm ? 'ok' : 'ouro'}"></span>${p.finalizadaEm ? `Enviou em ${dataCurta(p.finalizadaEm)}` : 'Escolhendo'} • ${ids.length} ${ids.length === 1 ? 'foto' : 'fotos'}${p.pedido && p.pedido.total ? ` • ${p.pedido.status === 'pago' ? 'pago' : 'pedido'} ${brl(p.pedido.total)}` : ''}</div>
               <a class="icon-btn" href="${linkWhats(p.whats)}" target="_blank" rel="noopener" title="Conversar no WhatsApp" data-nao>${ic('wa')}</a>
             </div>
             <div class="pessoa-corpo">
@@ -177,6 +177,7 @@ function pintarEditor(g, nova) {
                 ${p.finalizadaEm ? `<button class="btn btn-linha btn-sm" data-reabre>Reabrir escolha</button>` : ''}
                 <button class="btn btn-perigo btn-sm" data-exclui>${ic('trash')} Excluir cadastro</button>
               </div>
+              ${p.finalizadaEm ? blocoPedidoAdm(p) : ''}
               ${ids.length ? `<div class="esc-adm">${ids.map(id => `<figure data-vf="${esc(id)}"><img loading="lazy" src="${esc(foto(id, 400))}" alt=""><figcaption><b>${esc(nomeDe[id])}</b>${p.fotos[id] ? `<i>“${esc(p.fotos[id])}”</i>` : ''}</figcaption></figure>`).join('')}</div>` : '<p class="dica">Ainda não escolheu nenhuma foto.</p>'}
             </div></div>`;
         }).join('')}</div>` : '<div class="vazio">Ninguém se cadastrou ainda. Envie o convite pelo WhatsApp.</div>'}
@@ -256,6 +257,10 @@ function pintarEditor(g, nova) {
         <label class="campo"><span>Fotos no pacote (por pessoa)</span><input class="input" type="number" min="0" data-k="limite" value="${esc(g.limite || 0)}"><div class="dica">0 = sem limite. A pessoa pode passar do limite; você combina o valor das extras.</div></label>
         <label class="campo"><span>Texto da marca d'água</span><input class="input" data-k="marca" value="${esc(g.marca)}"></label>
       </div>
+      <div class="g2">
+        <label class="campo"><span>Valor de cada foto além do pacote (R$)</span><input class="input" data-k="valorExtra" inputmode="decimal" value="${g.valorExtra == null ? '' : precoTxt(g.valorExtra)}" placeholder="Em branco = valor padrão do catálogo"></label>
+        <label class="campo"><span>Produtos</span><label class="chave" style="margin-top:10px"><input type="checkbox" data-k="lojaAtiva" ${g.lojaAtiva !== false ? 'checked' : ''}> Mostrar o catálogo de produtos nesta galeria</label></label>
+      </div>
       <label class="campo" style="margin-bottom:0"><span>Pasta com os originais (opcional)</span><input class="input" data-k="pastaOriginais" value="${g.pastaOriginais ? esc(linkPasta(g.pastaOriginais)) : ''}" placeholder="https://drive.google.com/drive/folders/…">
         <div class="dica">Se na seleção você colocou fotos menores, cole aqui o link da pasta com os arquivos em alta (JPG, TIFF ou RAW). Eu encontro cada foto escolhida pelo nome do arquivo. Deixe em branco para baixar o próprio arquivo da seleção.</div></label>
     </section>`}
@@ -301,6 +306,17 @@ function pintarEditor(g, nova) {
         if (!(await antesDeRecarregar())) return;
         try { pintarEditor((await adm('painelReabrirEscolha', { slug: g.slug, pessoa: p.id })).galeria); toast('Escolha reaberta'); } catch (e) { toast(e.message); }
       };
+      const vp = $('[data-vp]', el); if (vp) vp.onclick = async () => {
+        if (!(await antesDeRecarregar())) return;
+        vp.disabled = true; vp.textContent = 'Verificando…';
+        try {
+          const ng = (await adm('painelVerificarPagamento', { slug: g.slug, pessoa: p.id })).galeria;
+          const st = ng.pessoas[p.id].pedido.status;
+          pintarEditor(ng); $(`.pessoa[data-p="${CSS.escape(p.id)}"]`).classList.add('aberta');
+          toast(st === 'pago' ? 'Pagamento confirmado!' : st === 'processando' ? 'Pagamento em análise no Mercado Pago' : 'Ainda não foi pago');
+        } catch (e) { toast(e.message); vp.disabled = false; }
+      };
+      $$('[data-cl]', el).forEach(b => b.onclick = () => copiar(b.dataset.cl));
       $('[data-exclui]', el).onclick = async () => {
         if (!(await confirmar('Excluir este cadastro?', `As escolhas de ${esc(p.nome)} serão apagadas.`, 'Excluir cadastro', true))) return;
         if (!(await antesDeRecarregar())) return;

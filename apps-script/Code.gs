@@ -18,6 +18,7 @@ const NOME_PASTA_SELECAO = '1 • Seleção (fotos com marca d\'água)';
 const NOME_PASTA_ENTREGA = '2 • Entregas (fotos prontas)';
 const NOME_PASTA_EDITAR = '3 • Escolhidas para editar';
 const NOME_PASTA_MUSICAS = '4 • Músicas dos sites';
+const NOME_PASTA_CATALOGO = '5 • Catálogo de produtos';
 
 /* ============================================================
  * 1) RODE ESTA FUNÇÃO UMA VEZ (botão ▶ Executar, com "configurar"
@@ -65,7 +66,12 @@ function json_(obj) {
 
 const ACOES = {
   // ---- cliente ----
-  abrir: req => ({ galeria: visaoCliente_(galeriaCliente_(req), req.pessoa) }),
+  abrir: req => { const db = carregar_(); return { galeria: visaoCliente_(galeriaCliente_(req, db), req.pessoa, db) }; },
+  verificarPagamento: req => {
+    const g = galeriaCliente_(req);
+    if (!(g.pessoas || {})[req.pessoa]) throw new Error('Cadastro não encontrado.');
+    return { pessoa: visaoPessoa_(consultarPagamento_(g.slug, req.pessoa)) };
+  },
   entrarPessoa: req => entrarPessoa_(req),
   salvarEscolha: req => salvarEscolha_(req, false),
   finalizarEscolha: req => salvarEscolha_(req, true),
@@ -149,6 +155,51 @@ const ACOES = {
     arq.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
     return { url: 'https://drive.google.com/file/d/' + arq.getId() + '/view', nome: nome };
   },
+  painelCatalogo: req => {
+    admin_(req);
+    return { catalogo: catalogo_(carregar_()), mpConfigurado: !!mpToken_() };
+  },
+  painelSalvarCatalogo: req => {
+    admin_(req);
+    if (req.removerToken) PropertiesService.getScriptProperties().deleteProperty('MP_ACCESS_TOKEN');
+    const token = String(req.mpToken || '').trim();
+    if (token) {
+      if (!/^(APP_USR|TEST)-[\w-]{20,}$/.test(token)) throw new Error('Esse não parece um Access Token do Mercado Pago. Ele começa com APP_USR-.');
+      const r = UrlFetchApp.fetch('https://api.mercadopago.com/users/me', { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
+      if (r.getResponseCode() !== 200) throw new Error('O Mercado Pago recusou esse Access Token. Confira se copiou o de produção, inteiro.');
+      PropertiesService.getScriptProperties().setProperty('MP_ACCESS_TOKEN', token);
+    }
+    const cat = comTrava_(db => {
+      const atual = catalogo_(db);
+      const c = req.catalogo || {};
+      const antigos = {};
+      atual.produtos.forEach(x => { antigos[x.id] = x; });
+      if (Array.isArray(c.produtos)) {
+        if (c.produtos.length > 80) throw new Error('O catálogo pode ter até 80 produtos.');
+        atual.produtos = c.produtos.map(x => limparProduto_(x, antigos));
+      }
+      if ('parcelas' in c) atual.parcelas = Math.max(1, Math.min(12, Math.floor(Number(c.parcelas) || 1)));
+      if ('valorExtraPadrao' in c) atual.valorExtraPadrao = Math.max(0, Math.min(100000, numeroBR_(c.valorExtraPadrao)));
+      return atual;
+    });
+    return { catalogo: cat, mpConfigurado: !!mpToken_() };
+  },
+  painelEnviarImagem: req => {
+    admin_(req);
+    const tipo = String(req.tipo || '');
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(tipo)) throw new Error('Envie uma imagem JPG, PNG ou WEBP.');
+    const bytes = Utilities.base64Decode(String(req.dados || ''));
+    if (!bytes.length) throw new Error('A imagem chegou vazia.');
+    if (bytes.length > 8 * 1024 * 1024) throw new Error('A imagem precisa ter até 8 MB.');
+    const arq = pastaCatalogo_().createFile(Utilities.newBlob(bytes, tipo, limpar_(req.nome, 120) || 'produto.jpg'));
+    arq.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    return { id: arq.getId() };
+  },
+  painelVerificarPagamento: req => {
+    admin_(req);
+    consultarPagamento_(req.slug, req.pessoa);
+    return { galeria: completa_(galeriaPorSlug_(carregar_(), req.slug)) };
+  },
   painelExcluirPessoa: req => {
     admin_(req);
     return { galeria: completa_(comTrava_(db => {
@@ -195,6 +246,9 @@ function pastaRaiz_() {
 }
 function pastaSelecao_() {
   return pastaPorPropriedade_('PASTA_SELECAO', () => pastaRaiz_().createFolder(NOME_PASTA_SELECAO));
+}
+function pastaCatalogo_() {
+  return pastaPorPropriedade_('PASTA_CATALOGO', () => pastaRaiz_().createFolder(NOME_PASTA_CATALOGO));
 }
 function pastaMusicas_() {
   return pastaPorPropriedade_('PASTA_MUSICAS', () => pastaRaiz_().createFolder(NOME_PASTA_MUSICAS));
@@ -255,8 +309,8 @@ function admin_(req) {
   }
 }
 
-function galeriaCliente_(req) {
-  const db = carregar_();
+function galeriaCliente_(req, dbJa) {
+  const db = dbJa || carregar_();
   const g = db.galerias[String(req.slug || '')];
   if (!g || g.ativa === false) throw new Error('Galeria não encontrada. Confira o link que você recebeu.');
   const cache = CacheService.getScriptCache();
@@ -471,6 +525,8 @@ function aplicarEdicao_(g, d) {
     g.pastaOriginais = id;
   }
   if ('ativa' in d) g.ativa = !!d.ativa;
+  if ('lojaAtiva' in d) g.lojaAtiva = !!d.lojaAtiva;
+  if ('valorExtra' in d) g.valorExtra = String(d.valorExtra == null ? '' : d.valorExtra).trim() === '' ? null : Math.max(0, Math.min(100000, numeroBR_(d.valorExtra)));
   if ('cartaLetra' in d) g.cartaLetra = d.cartaLetra === 'manuscrita' ? 'manuscrita' : 'classica';
   if ('cartaPosicao' in d) g.cartaPosicao = d.cartaPosicao === 'fim' ? 'fim' : 'inicio';
   if ('musicaInicio' in d) g.musicaInicio = Math.max(0, Math.min(900, Math.floor(Number(d.musicaInicio) || 0)));
@@ -506,10 +562,17 @@ function aplicarEdicao_(g, d) {
 
 /* ---- o que o cliente recebe ---- */
 function visaoPessoa_(p) {
-  return p ? { id: p.id, nome: p.nome, fotos: p.fotos || {}, finalizadaEm: p.finalizadaEm || null } : null;
+  if (!p) return null;
+  const v = { id: p.id, nome: p.nome, fotos: p.fotos || {}, finalizadaEm: p.finalizadaEm || null, carrinho: p.carrinho || [] };
+  if (p.pedido) {
+    const o = p.pedido;
+    v.pedido = { itens: o.itens, extras: o.extras, total: o.total, pagoAntes: o.pagoAntes, aPagar: o.aPagar,
+      status: o.status, link: o.link || '', parcelas: o.parcelas || 1, criadoEm: o.criadoEm, pagoEm: o.pagoEm || null };
+  }
+  return v;
 }
 
-function visaoCliente_(g, pessoaId) {
+function visaoCliente_(g, pessoaId, db) {
   const base = {
     slug: g.slug, tipo: g.tipo, cliente: g.cliente, titulo: g.titulo,
     subtitulo: g.subtitulo, frase: g.frase, estudio: NOME_ESTUDIO
@@ -518,6 +581,7 @@ function visaoCliente_(g, pessoaId) {
     return Object.assign(base, {
       fotos: todasFotos_(g).map(f => ({ id: f.id, n: f.n, w: f.w, h: f.h })),
       limite: g.limite, marca: g.marca,
+      loja: visaoLoja_(g, db || carregar_()),
       pessoa: visaoPessoa_((g.pessoas || {})[pessoaId])
     });
   }
@@ -609,13 +673,21 @@ function salvarEscolha_(req, finalizar) {
     });
     if (finalizar && !Object.keys(fotos).length) throw new Error('Escolha pelo menos uma foto antes de enviar.');
     p.fotos = fotos;
+    if ('carrinho' in req || finalizar) p.carrinho = carrinhoValido_(Array.isArray(req.carrinho) ? req.carrinho : (p.carrinho || []), fotos, catalogo_(db), finalizar);
     p.atualizadaEm = Date.now();
-    if (finalizar) p.finalizadaEm = Date.now();
+    if (finalizar) {
+      p.finalizadaEm = Date.now();
+      p.pedido = calcularPedido_(real, p, catalogo_(db));
+    }
     real.atualizadaEm = Date.now();
-    return { g: real, p: p };
+    return { g: real, p: p, parcelas: catalogo_(db).parcelas };
   });
-  if (finalizar) avisarEscolhaFinalizada_(resultado.g, resultado.p);
-  return { pessoa: visaoPessoa_(resultado.p) };
+  let p = resultado.p;
+  if (finalizar) {
+    if (p.pedido.status === 'aguardando') p = criarPagamento_(resultado.g, p, resultado.parcelas);
+    avisarEscolhaFinalizada_(resultado.g, p);
+  }
+  return { pessoa: visaoPessoa_(p) };
 }
 
 function avisarEscolhaFinalizada_(g, p) {
@@ -627,6 +699,7 @@ function avisarEscolhaFinalizada_(g, p) {
     const corpo = p.nome + ' (WhatsApp ' + p.whats + ') finalizou a escolha na galeria ' + g.cliente + ': ' +
       ids.length + ' foto(s)' + (g.limite ? ' (pacote: ' + g.limite + ')' : '') + '.\n\n' + linhas.join('\n') +
       '\n\nNomes dos arquivos para colar no Lightroom:\n' + ids.map(id => String(nomes[id]).replace(/\.[^.]+$/, '')).join(', ') +
+      textoPedido_(p.pedido) +
       '\n\nVer no painel: ' + SITE_URL + '/?painel';
     MailApp.sendEmail(Session.getEffectiveUser().getEmail(), 'Escolha finalizada • ' + p.nome + ' • ' + g.cliente, corpo);
   } catch (e) { /* o aviso por e-mail é opcional */ }
@@ -908,6 +981,8 @@ function verificarNovasPastas() {
     try { comTrava_(dbx => sincronizar_(galeriaPorSlug_(dbx, slug))); } catch (e) { /* ignora */ }
   });
 
+  try { verificarPagamentosPendentes_(); } catch (e) { /* ignora */ }
+
   if (criadas.length) {
     const texto = criadas.map(g => (g.tipo === 'entrega' ? 'Fotos prontas' : 'Seleção') + ' • ' + g.cliente +
       '\nLink: ' + SITE_URL + '/?g=' + encodeURIComponent(g.slug) + '\nPIN: ' + g.pin).join('\n\n');
@@ -918,4 +993,226 @@ function verificarNovasPastas() {
         '\n\nPara mudar frase, capa, música ou pastas: ' + SITE_URL + '/?painel');
     } catch (e) { /* opcional */ }
   }
+}
+
+
+/* ===================== Catálogo de produtos e pagamento (Mercado Pago) ===================== */
+
+function catalogo_(db) {
+  db.catalogo = db.catalogo || {};
+  const c = db.catalogo;
+  c.produtos = Array.isArray(c.produtos) ? c.produtos : [];
+  if (c.parcelas == null) c.parcelas = 12;
+  if (c.valorExtraPadrao == null) c.valorExtraPadrao = 0;
+  return c;
+}
+
+/** Aceita 149,90 • 149.90 • 1.249,90 • R$ 50 */
+function numeroBR_(v) {
+  if (typeof v === 'number') return isFinite(v) ? Math.round(v * 100) / 100 : 0;
+  let t = String(v == null ? '' : v).replace(/[^\d,.-]/g, '');
+  if (t.indexOf(',') >= 0) t = t.replace(/\./g, '').replace(',', '.');
+  const n = Number(t);
+  return isFinite(n) ? Math.round(n * 100) / 100 : 0;
+}
+
+function brl_(v) {
+  const n = (Math.round(Number(v || 0) * 100) / 100).toFixed(2).split('.');
+  return 'R$ ' + n[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + n[1];
+}
+
+function limparProduto_(x, antigos) {
+  let id = String(x.id || '');
+  if (!antigos[id]) id = 'p' + Math.random().toString(36).slice(2, 10);
+  const nome = limpar_(x.nome, 80);
+  if (!nome) throw new Error('Todo produto precisa de um nome.');
+  const imagem = String(x.imagem || '');
+  return {
+    id: id, nome: nome, descricao: limpar_(x.descricao, 400),
+    preco: Math.max(0, Math.min(100000, numeroBR_(x.preco))),
+    fotos: Math.max(0, Math.min(200, Math.floor(Number(x.fotos) || 0))),
+    pedeTexto: !!x.pedeTexto, dicaTexto: limpar_(x.dicaTexto, 120),
+    imagem: /^[\w-]{10,}$/.test(imagem) ? imagem : '',
+    ativo: x.ativo !== false
+  };
+}
+
+function valorExtra_(g, cat) {
+  return g.valorExtra == null ? Number(cat.valorExtraPadrao || 0) : Number(g.valorExtra || 0);
+}
+
+function visaoLoja_(g, db) {
+  const cat = catalogo_(db);
+  if (g.lojaAtiva === false) return null;
+  const produtos = cat.produtos.filter(x => x.ativo).map(x => ({
+    id: x.id, nome: x.nome, descricao: x.descricao, preco: x.preco, fotos: x.fotos,
+    pedeTexto: x.pedeTexto, dicaTexto: x.dicaTexto, imagem: x.imagem
+  }));
+  const extra = valorExtra_(g, cat);
+  if (!produtos.length && !(extra > 0 && g.limite)) return null;
+  return { produtos: produtos, valorExtra: extra, parcelas: cat.parcelas, pagamentoOnline: !!mpToken_() };
+}
+
+/** Confere o carrinho que veio do site: só produtos que existem, só fotos que a pessoa escolheu. */
+function carrinhoValido_(lista, fotosEscolhidas, cat, rigoroso) {
+  const prods = {};
+  cat.produtos.forEach(x => { prods[x.id] = x; });
+  const saida = [];
+  lista.slice(0, 30).forEach(it => {
+    const prod = prods[String(it && it.produto || '')];
+    if (!prod || !prod.ativo) return;
+    const vistas = {};
+    const fotos = (Array.isArray(it.fotos) ? it.fotos : []).map(String)
+      .filter(id => fotosEscolhidas[id] !== undefined && !vistas[id] && (vistas[id] = true))
+      .slice(0, prod.fotos);
+    if (rigoroso && prod.fotos > 0 && !fotos.length) throw new Error('Escolha a foto para o produto "' + prod.nome + '".');
+    saida.push({
+      id: limpar_(it.id, 20) || Math.random().toString(36).slice(2, 10),
+      produto: prod.id, fotos: fotos,
+      texto: prod.pedeTexto ? limpar_(it.texto, 300) : '',
+      qtd: Math.max(1, Math.min(99, Math.floor(Number(it.qtd) || 1)))
+    });
+  });
+  return saida;
+}
+
+function calcularPedido_(g, p, cat) {
+  const prods = {};
+  cat.produtos.forEach(x => { prods[x.id] = x; });
+  const nomes = {};
+  todasFotos_(g).forEach(f => { nomes[f.id] = f.n; });
+  const itens = (p.carrinho || []).filter(it => prods[it.produto]).map(it => {
+    const prod = prods[it.produto];
+    return {
+      produto: prod.id, nome: prod.nome, preco: prod.preco, qtd: it.qtd,
+      subtotal: Math.round(prod.preco * it.qtd * 100) / 100,
+      fotos: it.fotos.map(id => ({ id: id, n: nomes[id] || id })), texto: it.texto
+    };
+  });
+  const n = Object.keys(p.fotos || {}).length;
+  const qtdExtra = g.limite ? Math.max(0, n - g.limite) : 0;
+  const unit = valorExtra_(g, cat);
+  const extras = { qtd: qtdExtra, valorUnit: unit, subtotal: Math.round(qtdExtra * unit * 100) / 100 };
+  const total = Math.round((itens.reduce((s, i) => s + i.subtotal, 0) + extras.subtotal) * 100) / 100;
+  const pagoAntes = Math.round(Number(p.pagoTotal || 0) * 100) / 100;
+  const aPagar = Math.max(0, Math.round((total - pagoAntes) * 100) / 100);
+  let status = 'sem_valor';
+  if (aPagar > 0) status = mpToken_() ? 'aguardando' : 'sem_link';
+  else if (total > 0) status = 'pago';
+  return {
+    itens: itens, extras: extras, total: total, pagoAntes: pagoAntes, aPagar: aPagar, status: status,
+    ref: g.slug + '|' + p.id + '|' + Date.now(), link: '', parcelas: cat.parcelas, criadoEm: Date.now(), pagoEm: null
+  };
+}
+
+function textoPedido_(o) {
+  if (!o || (!o.itens.length && !o.extras.qtd)) return '';
+  const linhas = o.itens.map(i => '• ' + i.qtd + 'x ' + i.nome + ' — ' + brl_(i.subtotal) +
+    (i.fotos.length ? '\n    fotos: ' + i.fotos.map(f => String(f.n).replace(/\.[^.]+$/, '')).join(', ') : '') +
+    (i.texto ? '\n    texto: "' + i.texto + '"' : ''));
+  if (o.extras.qtd) linhas.push('• ' + o.extras.qtd + ' foto(s) além do pacote — ' + brl_(o.extras.subtotal));
+  const st = { aguardando: 'aguardando pagamento (link do Mercado Pago enviado ao cliente)', sem_link: 'sem link de pagamento — configure o Mercado Pago no painel',
+    erro_link: 'não consegui gerar o link do Mercado Pago', pago: 'pago', processando: 'pagamento em análise', sem_valor: '' }[o.status] || o.status;
+  return '\n\nPEDIDO\n' + linhas.join('\n') + '\nTotal: ' + brl_(o.total) +
+    (o.pagoAntes ? '\nJá pago antes: ' + brl_(o.pagoAntes) + '\nA pagar agora: ' + brl_(o.aPagar) : '') + (st ? '\nSituação: ' + st : '');
+}
+
+function mpToken_() {
+  return PropertiesService.getScriptProperties().getProperty('MP_ACCESS_TOKEN') || '';
+}
+
+/** Cria o link de pagamento (Checkout Pro): Pix ou cartão parcelado. */
+function criarPagamento_(g, p, parcelas) {
+  const o = p.pedido;
+  let link = '', status = 'erro_link';
+  try {
+    const corpo = {
+      items: [{
+        id: 'pedido', title: (NOME_ESTUDIO + ' • ' + g.cliente).slice(0, 250), quantity: 1, currency_id: 'BRL', unit_price: o.aPagar,
+        description: o.itens.map(i => i.qtd + 'x ' + i.nome).concat(o.extras.qtd ? [o.extras.qtd + ' foto(s) extra(s)'] : []).join(', ').slice(0, 250)
+      }],
+      payer: Object.assign({ name: p.nome }, p.email ? { email: p.email } : {}),
+      external_reference: o.ref,
+      back_urls: {
+        success: SITE_URL + '/?g=' + encodeURIComponent(g.slug) + '&pagamento=1',
+        pending: SITE_URL + '/?g=' + encodeURIComponent(g.slug) + '&pagamento=1',
+        failure: SITE_URL + '/?g=' + encodeURIComponent(g.slug) + '&pagamento=0'
+      },
+      auto_return: 'approved',
+      payment_methods: { installments: Math.max(1, Math.min(12, parcelas || 1)), excluded_payment_types: [{ id: 'ticket' }] },
+      statement_descriptor: 'TATIPRETTO'
+    };
+    const r = UrlFetchApp.fetch('https://api.mercadopago.com/checkout/preferences', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      headers: { Authorization: 'Bearer ' + mpToken_() }, payload: JSON.stringify(corpo)
+    });
+    if (r.getResponseCode() < 300) {
+      const j = JSON.parse(r.getContentText());
+      link = j.init_point || '';
+      if (link) status = 'aguardando';
+    }
+  } catch (e) { /* fica erro_link; a Tati pode gerar de novo pelo painel */ }
+  return comTrava_(db => {
+    const real = galeriaPorSlug_(db, g.slug);
+    const pp = real.pessoas[p.id];
+    if (pp && pp.pedido && pp.pedido.ref === o.ref) { pp.pedido.link = link; pp.pedido.status = status; }
+    return pp || p;
+  });
+}
+
+/** Pergunta ao Mercado Pago se o pedido foi pago. */
+function consultarPagamento_(slug, pessoaId) {
+  const db = carregar_();
+  const g = galeriaPorSlug_(db, slug);
+  const p = (g.pessoas || {})[pessoaId];
+  if (!p) throw new Error('Cadastro não encontrado.');
+  const o = p.pedido;
+  if (!o || ['aguardando', 'processando', 'erro_link', 'sem_link'].indexOf(o.status) < 0) return p;
+  if (!mpToken_()) return p;
+  if (o.status === 'erro_link' || o.status === 'sem_link') {
+    o.status = 'aguardando';
+    comTrava_(dbx => { const x = galeriaPorSlug_(dbx, slug).pessoas[pessoaId]; if (x && x.pedido && x.pedido.ref === o.ref) x.pedido.status = 'aguardando'; });
+    return criarPagamento_(g, p, catalogo_(db).parcelas);
+  }
+  const r = UrlFetchApp.fetch('https://api.mercadopago.com/v1/payments/search?sort=date_created&criteria=desc&external_reference=' + encodeURIComponent(o.ref), {
+    headers: { Authorization: 'Bearer ' + mpToken_() }, muteHttpExceptions: true
+  });
+  if (r.getResponseCode() !== 200) return p;
+  const res = (JSON.parse(r.getContentText()).results || []);
+  let novo = o.status;
+  if (res.some(x => x.status === 'approved')) novo = 'pago';
+  else if (res.some(x => x.status === 'in_process' || x.status === 'pending' || x.status === 'authorized')) novo = 'processando';
+  if (novo === o.status) return p;
+  const atual = comTrava_(dbx => {
+    const x = galeriaPorSlug_(dbx, slug).pessoas[pessoaId];
+    if (!x || !x.pedido || x.pedido.ref !== o.ref || x.pedido.status === 'pago') return x;
+    x.pedido.status = novo;
+    if (novo === 'pago') { x.pedido.pagoEm = Date.now(); x.pagoTotal = Math.round((Number(x.pagoTotal || 0) + x.pedido.aPagar) * 100) / 100; }
+    return x;
+  });
+  if (novo === 'pago') {
+    try {
+      MailApp.sendEmail(Session.getEffectiveUser().getEmail(), 'Pagamento confirmado • ' + p.nome + ' • ' + g.cliente,
+        p.nome + ' pagou ' + brl_(o.aPagar) + ' pelo Mercado Pago (galeria ' + g.cliente + ').' + textoPedido_(atual.pedido) +
+        '\n\nVer no painel: ' + SITE_URL + '/?painel');
+    } catch (e) { /* opcional */ }
+  }
+  return atual;
+}
+
+/** Roda junto com a verificação automática: confere pedidos esperando pagamento (até 7 dias). */
+function verificarPagamentosPendentes_() {
+  if (!mpToken_()) return;
+  const db = carregar_();
+  let feitos = 0;
+  Object.keys(db.galerias).forEach(slug => {
+    const g = db.galerias[slug];
+    Object.keys(g.pessoas || {}).forEach(pid => {
+      const o = g.pessoas[pid].pedido;
+      if (feitos >= 25 || !o || (o.status !== 'aguardando' && o.status !== 'processando') || !o.link) return;
+      if (Date.now() - o.criadoEm > 7 * 24 * 3600 * 1000) return;
+      feitos++;
+      try { consultarPagamento_(slug, pid); } catch (e) { /* ignora */ }
+    });
+  });
 }

@@ -460,6 +460,8 @@ function telaSelecao() {
   let filtro = enviada ? 'escolhidas' : 'todas';
   let estado = '';
   const abertos = new Set();
+  const loja = g.loja && g.loja.produtos && g.loja.produtos.length ? g.loja : null;
+  const carrinho = (p.carrinho || []).map(x => Object.assign({}, x, { fotos: (x.fotos || []).slice() }));
   const chaveRasc = 'tp_rasc_' + g.slug + '_' + p.id;
   const rasc = store.get(chaveRasc);
   if (!enviada && rasc && !Object.keys(escolha).length) { try { Object.assign(escolha, JSON.parse(rasc)); } catch (e) {} }
@@ -467,11 +469,15 @@ function telaSelecao() {
   const salvar = debounce(async () => {
     if (enviada) return;
     estado = 'Salvando…'; pintarBarras();
-    try { await api('salvarEscolha', { slug: g.slug, pin: PIN, pessoa: p.id, fotos: escolha }); estado = 'Tudo salvo'; }
+    try { await api('salvarEscolha', { slug: g.slug, pin: PIN, pessoa: p.id, fotos: escolha, carrinho }); estado = 'Tudo salvo'; }
     catch (e) { estado = 'Não foi possível salvar agora'; }
     pintarBarras();
   }, 1000);
-  function mudou() { store.set(chaveRasc, JSON.stringify(escolha)); estado = 'Salvando…'; pintarBarras(); salvar(); }
+  function mudou() {
+    carrinho.forEach(it => { it.fotos = it.fotos.filter(id => id in escolha); });
+    store.set(chaveRasc, JSON.stringify(escolha)); estado = 'Salvando…'; pintarBarras(); salvar();
+  }
+  const ctxLoja = () => ({ g, escolha, carrinho, numero: id => numero(id), aoMudar: mudou });
   const total = () => Object.keys(escolha).length;
   const numero = id => g.fotos.findIndex(f => f.id === id) + 1;
   const visiveis = () => filtro === 'escolhidas' ? g.fotos.filter(f => f.id in escolha) : g.fotos;
@@ -491,7 +497,8 @@ function telaSelecao() {
       <div class="como">
         <div><b><i>1</i> Escolha</b>Toque em “Escolher” nas fotos que você mais gostou.</div>
         <div><b><i>2</i> Comente</b>Nas escolhidas, toque em “Comentar” se quiser pedir algum ajuste.</div>
-        <div><b><i>3</i> Envie</b>Quando terminar, toque em “Enviar minha escolha”.</div>
+        ${loja ? `<div><b><i>3</i> Produtos</b>Se quiser, veja o catálogo e coloque suas fotos em quadros, álbuns e mais.</div>` : ''}
+        <div><b><i>${loja ? 4 : 3}</i> Envie</b>Quando terminar, toque em “Enviar minha escolha”.</div>
       </div>
     </header>
     <main class="wrap" style="padding-bottom:140px">
@@ -512,8 +519,9 @@ function telaSelecao() {
     $('#rodape').innerHTML = enviada
       ? `<div class="txt">${ic('check', 'style="vertical-align:-4px;color:var(--gold)"')} Escolha enviada<small>${n} ${n === 1 ? 'foto' : 'fotos'} • ${dataBR(p.finalizadaEm)}</small></div>`
       : `<div class="txt">${n} ${n === 1 ? 'foto escolhida' : 'fotos escolhidas'}${acima ? ` <span style="color:var(--warn)">(${n - g.limite} além do pacote)</span>` : ''}<small>${esc(estado || 'Suas escolhas são salvas sozinhas')}</small></div>
-         <span class="espaco"></span><button class="btn btn-ouro" id="enviar" ${n ? '' : 'disabled'}>Enviar minha escolha</button>`;
-    const b = $('#enviar'); if (b) b.onclick = revisar;
+         <span class="espaco"></span>${loja ? `<button class="btn btn-linha" id="produtos">${ic('plus')} Produtos${carrinho.length ? ` (${carrinho.length})` : ''}</button>` : ''}<button class="btn btn-ouro" id="enviar" ${n ? '' : 'disabled'}>Enviar minha escolha</button>`;
+    const b = $('#enviar'); if (b) b.onclick = () => (loja && !carrinho.length ? abrirLoja(Object.assign(ctxLoja(), { aoContinuar: revisar })) : revisar());
+    const bp = $('#produtos'); if (bp) bp.onclick = () => abrirLoja(ctxLoja());
     $('#filtros').innerHTML = `<button class="chip ${filtro === 'todas' ? 'on' : ''}" data-f="todas">Todas as fotos (${g.fotos.length})</button>
       <button class="chip ${filtro === 'escolhidas' ? 'on' : ''}" data-f="escolhidas">Minhas escolhidas (${n})</button>`;
     $$('[data-f]').forEach(x => x.onclick = () => { filtro = x.dataset.f; pintarBarras(); pintarGrade(); });
@@ -538,7 +546,7 @@ function telaSelecao() {
   function pintarGrade() {
     const lista = visiveis();
     $('#aviso').innerHTML = enviada
-      ? `<div class="feito"><b>Obrigada, ${esc(p.nome.split(' ')[0])}!</b> Sua escolha foi enviada${p.finalizadaEm ? ' em ' + dataBR(p.finalizadaEm) : ''}. Se precisar mudar algo, é só falar com a Tati.</div>` : '';
+      ? `<div class="feito"><b>Obrigada, ${esc(p.nome.split(' ')[0])}!</b> Sua escolha foi enviada${p.finalizadaEm ? ' em ' + dataBR(p.finalizadaEm) : ''}. Se precisar mudar algo, é só falar com a Tati.</div>${blocoPedidoCliente(p, g)}` : '';
     $('#grade').innerHTML = lista.length ? lista.map(cartao).join('')
       : `<div class="vazio" style="grid-column:1/-1">Você ainda não escolheu nenhuma foto. Toque em “Escolher” nas suas favoritas.</div>`;
   }
@@ -595,27 +603,44 @@ function telaSelecao() {
     const ids = g.fotos.filter(f => f.id in escolha);
     const n = ids.length;
     let aviso = '';
-    if (g.limite && n > g.limite) aviso = `<div class="aviso alerta">Você escolheu ${n} fotos e o pacote inclui ${g.limite}. As ${n - g.limite} fotos extras podem ter um valor adicional — a Tati combina isso com você.</div>`;
+    const conta = contaPedido(g, escolha, carrinho);
+    const pagaOnline = conta.total > 0 && g.loja && g.loja.pagamentoOnline;
+    if (g.limite && n > g.limite && !(g.loja && g.loja.valorExtra)) aviso = `<div class="aviso alerta">Você escolheu ${n} fotos e o pacote inclui ${g.limite}. As ${n - g.limite} fotos extras podem ter um valor adicional — a Tati combina isso com você.</div>`;
     else if (g.limite && n < g.limite) aviso = `<div class="aviso">Você ainda pode escolher mais ${g.limite - n} ${g.limite - n === 1 ? 'foto' : 'fotos'} do pacote.</div>`;
     const j = abrirJanela(`<h3>Confira sua <em class="ouro">escolha</em></h3>
       <p>${n} ${n === 1 ? 'foto escolhida' : 'fotos escolhidas'}. Depois de enviar, a escolha fica fechada.</p>${aviso}
       <div class="lista-esc">${ids.map(f => `<div class="it"><img src="${esc(foto(f.id, 200))}" alt=""><div><b>Foto ${numero(f.id)}</b><div>${escolha[f.id] ? '“' + esc(escolha[f.id]) + '”' : 'Sem comentário'}</div></div></div>`).join('')}</div>
+      ${conta.total > 0 ? `<div class="pd-caixa"><div class="cap" style="margin-bottom:10px">Seu pedido</div>${linhasPedido(conta)}<div class="pd-total"><span>Total</span><b>${brl(conta.total)}</b></div>
+        <div class="dica" style="margin:8px 0 0">${pagaOnline ? `Depois de enviar, você paga com segurança pelo Mercado Pago: ${textoParcelas(g.loja.parcelas)}.` : 'A Tati vai te enviar a forma de pagamento.'}</div></div>` : ''}
+      ${loja ? `<button class="btn btn-ghost btn-sm" data-loja style="padding-left:0">${ic('plus')} ${carrinho.length ? 'Mudar produtos' : 'Ver produtos'}</button>` : ''}
       <div class="erro" id="errf"></div>
-      <div class="janela-acoes"><button class="btn btn-linha" data-n>Voltar</button><button class="btn btn-ouro" data-s>Enviar minha escolha</button></div>`, { largura: 560 });
+      <div class="janela-acoes"><button class="btn btn-linha" data-n>Voltar</button><button class="btn btn-ouro" data-s>${pagaOnline ? `Enviar e pagar ${brl(conta.total)}` : 'Enviar minha escolha'}</button></div>`, { largura: 560 });
+    const bl = $('[data-loja]', j); if (bl) bl.onclick = () => { fecharJanela(j); abrirLoja(Object.assign(ctxLoja(), { aoContinuar: revisar })); };
     $('[data-n]', j).onclick = () => fecharJanela(j);
     $('[data-s]', j).onclick = async ev => {
       const btn = ev.currentTarget; btn.disabled = true; btn.textContent = 'Enviando…';
       try {
-        const r = await api('finalizarEscolha', { slug: g.slug, pin: PIN, pessoa: p.id, fotos: escolha });
+        const r = await api('finalizarEscolha', { slug: g.slug, pin: PIN, pessoa: p.id, fotos: escolha, carrinho });
         Object.assign(p, r.pessoa); enviada = true; store.del(chaveRasc);
         fecharJanela(j); filtro = 'escolhidas'; pintarBarras(); pintarGrade();
         window.scrollTo({ top: 0, behavior: 'smooth' });
-        abrirJanela(`<div class="orn" style="margin-top:0">✦</div><h3 style="text-align:center">Escolha <em class="ouro">enviada</em></h3><p style="text-align:center">A Tati recebeu suas ${n} fotos${Object.values(escolha).some(Boolean) ? ' e seus comentários' : ''}. Agora é com ela!</p><div class="janela-acoes" style="justify-content:center"><button class="btn btn-ouro" onclick="fecharJanela()">Fechar</button></div>`);
+        const o = p.pedido;
+        if (o && o.status === 'aguardando' && o.link) {
+          abrirJanela(`<div class="orn" style="margin-top:0">✦</div><h3 style="text-align:center">Escolha <em class="ouro">enviada</em></h3>
+            <p style="text-align:center">A Tati recebeu suas ${n} fotos. Agora falta só o pagamento do pedido.</p>
+            <div class="pd-caixa">${linhasPedido(o)}<div class="pd-total"><span>Total</span><b>${brl(o.aPagar)}</b></div></div>
+            <a class="btn btn-ouro" style="width:100%;margin-top:6px" href="${esc(o.link)}">${ic('lock')} Pagar agora • ${textoParcelas(o.parcelas)}</a>
+            <p class="dica" style="text-align:center;margin-top:12px">Você vai para o site seguro do Mercado Pago e volta para cá no final.</p>
+            <div class="janela-acoes" style="justify-content:center"><button class="btn btn-ghost btn-sm" onclick="fecharJanela()">Pagar depois</button></div>`, { largura: 520 });
+        } else {
+          abrirJanela(`<div class="orn" style="margin-top:0">✦</div><h3 style="text-align:center">Escolha <em class="ouro">enviada</em></h3><p style="text-align:center">A Tati recebeu suas ${n} fotos${Object.values(escolha).some(Boolean) ? ' e seus comentários' : ''}${o && o.total ? ` e seu pedido de ${brl(o.total)}` : ''}. Agora é com ela!</p>${o && (o.status === 'sem_link' || o.status === 'erro_link') ? '<p class="dica" style="text-align:center">Ela vai te enviar a forma de pagamento.</p>' : ''}<div class="janela-acoes" style="justify-content:center"><button class="btn btn-ouro" onclick="fecharJanela()">Fechar</button></div>`);
+        }
       } catch (e) { $('#errf', j).textContent = e.message; btn.disabled = false; btn.textContent = 'Enviar minha escolha'; }
     };
   }
 
   pintarBarras(); pintarGrade();
+  if (enviada && p.pedido) voltaPagamento(g, p, () => pintarGrade());
 }
 
 /* ---------- fotos prontas: estilo revista ---------- */
@@ -801,7 +826,7 @@ async function abrirPainel() {
   try {
     INFO = await adm('painelEntrar');
     const ed = new URLSearchParams(location.search).get('ed');
-    if (ed) telaEditor(ed); else telaLista();
+    if (ed) telaEditor(ed); else if (new URLSearchParams(location.search).has('catalogo')) telaCatalogo(); else telaLista();
   } catch (e) { store.sdel('tp_senha'); SENHA = ''; telaLogin(e.message); }
 }
 
@@ -855,7 +880,7 @@ async function telaLista() {
 function pintarLista() {
   const lista = LISTA.filter(r => FILTRO_ADM === 'todas' || r.tipo === FILTRO_ADM);
   $('.adm').innerHTML = `
-    <div class="adm-cab"><h1>Galerias</h1><button class="btn btn-ouro" id="nova">${ic('plus')} Nova galeria</button></div>
+    <div class="adm-cab"><h1>Galerias</h1><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-linha" id="cat">Produtos e pagamento</button><button class="btn btn-ouro" id="nova">${ic('plus')} Nova galeria</button></div></div>
     <div class="filtros" style="justify-content:flex-start;margin-top:0">
       ${[['todas', 'Todas'], ['selecao', 'Seleção'], ['entrega', 'Fotos prontas']].map(([k, t]) => `<button class="chip ${FILTRO_ADM === k ? 'on' : ''}" data-fa="${k}">${t}</button>`).join('')}
     </div>
@@ -880,6 +905,7 @@ function pintarLista() {
       </ol>
     </div>`;
   $('#nova').onclick = () => janelaNova();
+  $('#cat').onclick = () => telaCatalogo();
   $$('[data-fa]').forEach(b => b.onclick = () => { FILTRO_ADM = b.dataset.fa; pintarLista(); });
   $$('[data-ed]').forEach(b => b.onclick = () => telaEditor(b.dataset.ed));
   $$('[data-cv]').forEach(b => b.onclick = () => copiar(convite(LISTA.find(x => x.slug === b.dataset.cv))));
