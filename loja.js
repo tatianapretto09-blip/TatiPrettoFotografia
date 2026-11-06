@@ -35,7 +35,7 @@ function linhasPedido(o) {
 
 function textoParcelas(n, semJuros) {
   if (semJuros > 1) return `Pix ou cartão em até ${semJuros}x sem juros${n > semJuros ? ` (ou até ${n}x)` : ''}`;
-  return n > 1 ? `Pix ou cartão em até ${n}x` : 'Pix ou cartão';
+  return n > 1 ? `Pix ou cartão em até ${n}x (no cartão, a taxa da operadora é somada ao valor)` : 'Pix ou cartão';
 }
 const nomeProvedor = v => v === 'infinitepay' ? 'InfinitePay' : v === 'mercadopago' ? 'Mercado Pago' : 'site de pagamento';
 
