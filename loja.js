@@ -1,4 +1,4 @@
-/* Tati Pretto Fotografia — catálogo de produtos, pedido e pagamento (Mercado Pago).
+/* Tati Pretto Fotografia — catálogo de produtos, pedido e pagamento (InfinitePay ou Mercado Pago).
    Carregado depois do painel.js. */
 
 const brl = v => (Math.round(Number(v || 0) * 100) / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -33,16 +33,20 @@ function linhasPedido(o) {
   return l.join('');
 }
 
-function textoParcelas(n) { return n > 1 ? `Pix ou cartão em até ${n}x` : 'Pix ou cartão'; }
+function textoParcelas(n, semJuros) {
+  if (semJuros > 1) return `Pix ou cartão em até ${semJuros}x sem juros${n > semJuros ? ` (ou até ${n}x)` : ''}`;
+  return n > 1 ? `Pix ou cartão em até ${n}x` : 'Pix ou cartão';
+}
+const nomeProvedor = v => v === 'infinitepay' ? 'InfinitePay' : v === 'mercadopago' ? 'Mercado Pago' : 'site de pagamento';
 
 /** Bloco do pedido que aparece depois que a escolha foi enviada. */
 function blocoPedidoCliente(p, g) {
   const o = p.pedido;
   if (!o || (!o.itens.length && !(o.extras && o.extras.subtotal))) return '';
   const st = {
-    pago: `<div class="pd-status ok">${ic('check')} Pagamento confirmado${o.pagoEm ? ' em ' + dataBR(o.pagoEm) : ''}. Obrigada!</div>`,
-    processando: `<div class="pd-status">Pagamento em análise pelo Mercado Pago. Assim que for confirmado, aparece aqui.</div>`,
-    aguardando: o.link ? `<a class="btn btn-ouro" style="width:100%" href="${esc(o.link)}">${ic('lock')} Pagar ${brl(o.aPagar)} • ${textoParcelas(o.parcelas)}</a>` : '',
+    pago: `<div class="pd-status ok">${ic('check')} Pagamento confirmado${o.pagoEm ? ' em ' + dataBR(o.pagoEm) : ''}. Obrigada!</div>${o.comprovante ? `<a class="btn btn-ghost btn-sm" style="padding-left:0" href="${esc(o.comprovante)}" target="_blank" rel="noopener">Ver comprovante</a>` : ''}`,
+    processando: `<div class="pd-status">Pagamento em análise. Assim que for confirmado, aparece aqui.</div>`,
+    aguardando: o.link ? `<a class="btn btn-ouro" style="width:100%" href="${esc(o.link)}">${ic('lock')} Pagar ${brl(o.aPagar)}</a><div class="dica" style="text-align:center;margin:8px 0 0">${textoParcelas(o.parcelas, o.semJuros)}</div>` : '',
     erro_link: `<div class="pd-status">A Tati vai te enviar o link de pagamento.</div>`,
     sem_link: `<div class="pd-status">A Tati vai te enviar a forma de pagamento.</div>`,
   }[o.status] || '';
@@ -141,17 +145,23 @@ function configurarItem(ctx, pr, item, depois) {
   pintar();
 }
 
-/** Volta do Mercado Pago: confere o pagamento e avisa. */
+/** Volta do site de pagamento: confere o pagamento e avisa. */
 async function voltaPagamento(g, p, depois) {
   const q = new URLSearchParams(location.search);
   if (!q.has('pagamento')) return;
   const deu = q.get('pagamento') === '1';
+  const transacao = {};
+  ['order_nsu', 'slug', 'transaction_nsu', 'receipt_url'].forEach(k => { if (q.get(k)) transacao[k] = q.get(k); });
   history.replaceState(null, '', '?g=' + encodeURIComponent(g.slug));
   let pessoa = p;
-  try { pessoa = (await api('verificarPagamento', { slug: g.slug, pin: PIN, pessoa: p.id })).pessoa; Object.assign(p, pessoa); if (depois) depois(); } catch (e) { /* mostra o aviso mesmo assim */ }
+  for (let tentativa = 0; tentativa < 3; tentativa++) {
+    try { pessoa = (await api('verificarPagamento', { slug: g.slug, pin: PIN, pessoa: p.id, transacao })).pessoa; Object.assign(p, pessoa); if (depois) depois(); } catch (e) { /* mostra o aviso mesmo assim */ }
+    if (!deu || (p.pedido && p.pedido.status === 'pago')) break;
+    await espera(2500);
+  }
   const st = p.pedido && p.pedido.status;
   const msg = st === 'pago' ? ['Pagamento <em class="ouro">confirmado</em>', 'Obrigada! A Tati já recebeu seu pedido e o pagamento.']
-    : deu || st === 'processando' ? ['Pagamento <em class="ouro">recebido</em>', 'O Mercado Pago está confirmando. No Pix costuma levar poucos minutos; o aviso aparece aqui sozinho.']
+    : deu || st === 'processando' ? ['Pagamento <em class="ouro">recebido</em>', 'Estamos confirmando com o banco. No Pix costuma levar poucos minutos. A Tati recebe o aviso assim que for confirmado.']
     : ['Pagamento não <em class="ouro">concluído</em>', 'Tudo bem: sua escolha está salva. Quando quiser, toque em “Pagar” para tentar de novo.'];
   abrirJanela(`<div class="orn" style="margin-top:0">✦</div><h3 style="text-align:center">${msg[0]}</h3><p style="text-align:center">${msg[1]}</p><div class="janela-acoes" style="justify-content:center"><button class="btn btn-ouro" onclick="fecharJanela()">Fechar</button></div>`);
 }
@@ -169,6 +179,7 @@ async function telaCatalogo() {
 }
 
 function pintarCatalogo(cat, mpOk) {
+  const prov = cat.provedor || (cat.infiniteTag ? 'infinitepay' : mpOk ? 'mercadopago' : '');
   const prods = cat.produtos.map(x => Object.assign({}, x));
   let sujo = false;
   $('.adm').innerHTML = `
@@ -177,14 +188,27 @@ function pintarCatalogo(cat, mpOk) {
       <button class="btn btn-ouro" id="novo">${ic('plus')} Novo produto</button></div>
 
     <section class="sec"><h2>Pagamento</h2>
-      <div class="aviso ${mpOk ? 'ouro' : 'alerta'}">${mpOk ? `${ic('check')} Mercado Pago ligado. Ao enviar a escolha, o cliente recebe o link para pagar com Pix ou cartão.` : 'Mercado Pago ainda não ligado. Sem ele, o cliente vê o total, mas o pagamento você combina por fora.'}</div>
-      <label class="campo"><span>Access Token de produção do Mercado Pago</span><input class="input" id="tok" type="password" autocomplete="off" placeholder="${mpOk ? 'Já configurado. Cole outro só se quiser trocar' : 'APP_USR-…'}">
-        <div class="dica">Fica guardado só no seu Google. Não aparece de novo aqui nem no site. ${mpOk ? '<a href="#" id="remtok">Desligar o Mercado Pago</a>' : ''}</div></label>
-      <div class="g2">
-        <label class="campo"><span>Parcelar em até</span><select class="input" id="parc">${Array.from({ length: 12 }, (_, k) => `<option value="${k + 1}" ${cat.parcelas === k + 1 ? 'selected' : ''}>${k + 1}x${k ? '' : ' (só à vista)'}</option>`).join('')}</select></label>
-        <label class="campo"><span>Valor de cada foto além do pacote (padrão)</span><input class="input" id="vext" inputmode="decimal" value="${cat.valorExtraPadrao ? precoTxt(cat.valorExtraPadrao) : ''}" placeholder="Ex.: 25,00 (em branco = não cobra)">
-          <div class="dica">Dá para mudar em cada galeria.</div></label>
+      <label class="campo"><span>Onde o cliente paga</span><select class="input" id="prov">
+        <option value="infinitepay" ${prov === 'infinitepay' ? 'selected' : ''}>InfinitePay (Pix e cartão)</option>
+        <option value="mercadopago" ${prov === 'mercadopago' ? 'selected' : ''}>Mercado Pago (Pix e cartão)</option>
+        <option value="" ${prov === '' ? 'selected' : ''}>Nenhum: só mostrar o total, eu combino o pagamento</option></select></label>
+      <div data-so="infinitepay">
+        <div class="aviso ${cat.infiniteTag ? 'ouro' : 'alerta'}">${cat.infiniteTag ? `${ic('check')} InfinitePay ligada em <b>$${esc(cat.infiniteTag)}</b>. Ao enviar a escolha, o cliente recebe o link para pagar.` : 'Coloque sua InfiniteTag para ligar a InfinitePay.'}</div>
+        <div class="g2">
+          <label class="campo"><span>Sua InfiniteTag</span><input class="input" id="itag" value="${esc(cat.infiniteTag || '')}" placeholder="Ex.: tatipretto (sem o $)" autocomplete="off">
+            <div class="dica">Está no app da InfinitePay, no seu perfil (começa com $).</div></label>
+          <label class="campo"><span>Parcelas sem juros para o cliente</span><select class="input" id="sjur">${Array.from({ length: 13 }, (_, k) => `<option value="${k}" ${(cat.parcelasSemJuros || 0) === k ? 'selected' : ''}>${k ? `Até ${k}x sem juros` : 'Nenhuma (juros por conta do cliente)'}</option>`).join('')}</select>
+            <div class="dica">Use o mesmo número que está no app da InfinitePay, em <b>Configurações do Checkout → Parcelamento e taxas</b>. Aqui é só o texto que o cliente vê.</div></label>
+        </div>
       </div>
+      <div data-so="mercadopago">
+        <div class="aviso ${mpOk ? 'ouro' : 'alerta'}">${mpOk ? `${ic('check')} Mercado Pago ligado.` : 'Cole o Access Token para ligar o Mercado Pago.'}</div>
+        <label class="campo"><span>Access Token de produção do Mercado Pago</span><input class="input" id="tok" type="password" autocomplete="off" placeholder="${mpOk ? 'Já configurado. Cole outro só se quiser trocar' : 'APP_USR-…'}">
+          <div class="dica">Fica guardado só no seu Google. Não aparece de novo aqui nem no site. ${mpOk ? '<a href="#" id="remtok">Apagar o token</a>' : ''}</div></label>
+        <label class="campo"><span>Parcelar em até</span><select class="input" id="parc">${Array.from({ length: 12 }, (_, k) => `<option value="${k + 1}" ${cat.parcelas === k + 1 ? 'selected' : ''}>${k + 1}x${k ? '' : ' (só à vista)'}</option>`).join('')}</select></label>
+      </div>
+      <label class="campo" style="margin-bottom:0"><span>Valor de cada foto além do pacote (padrão)</span><input class="input" id="vext" inputmode="decimal" value="${cat.valorExtraPadrao ? precoTxt(cat.valorExtraPadrao) : ''}" placeholder="Ex.: 24,90 (em branco = não cobra)">
+        <div class="dica">Dá para mudar em cada galeria.</div></label>
     </section>
 
     <section class="sec"><h2>Catálogo</h2><p class="dica">O cliente vê os produtos ativos antes de enviar a escolha, escolhe as fotos, escreve o texto e a quantidade.</p>
@@ -194,9 +218,11 @@ function pintarCatalogo(cat, mpOk) {
   barra.innerHTML = `<div class="wrap"><span class="dica" style="margin:0" id="st">Nenhuma alteração</span><span class="espaco"></span><button class="btn btn-ouro" id="sv" disabled>Salvar alterações</button></div>`;
   $('.adm').appendChild(barra);
   const marcar = () => { sujo = true; $('#sv').disabled = false; $('#st').textContent = 'Alterações não salvas'; };
-  ['tok', 'parc', 'vext'].forEach(id => { $('#' + id).oninput = marcar; $('#' + id).onchange = marcar; });
+  ['prov', 'itag', 'sjur', 'tok', 'parc', 'vext'].forEach(id => { $('#' + id).oninput = marcar; $('#' + id).onchange = marcar; });
+  const mostraProv = () => $$('[data-so]').forEach(el => { el.style.display = el.dataset.so === $('#prov').value ? '' : 'none'; });
+  $('#prov').addEventListener('change', mostraProv); mostraProv();
   let remover = false;
-  const rt = $('#remtok'); if (rt) rt.onclick = async e => { e.preventDefault(); if (await confirmar('Desligar o Mercado Pago?', 'O cliente continua vendo o total, mas sem o botão de pagar.', 'Desligar', true)) { remover = true; marcar(); rt.textContent = 'Será desligado ao salvar'; } };
+  const rt = $('#remtok'); if (rt) rt.onclick = async e => { e.preventDefault(); if (await confirmar('Apagar o token do Mercado Pago?', 'Ele sai do seu Google. Para usar o Mercado Pago de novo, será preciso colar outro.', 'Apagar', true)) { remover = true; marcar(); rt.textContent = 'Será apagado ao salvar'; } };
   $('#volta').onclick = async () => { if (sujo && !(await confirmar('Sair sem salvar?', 'As alterações do catálogo ainda não foram salvas.', 'Sair sem salvar', true))) return; telaLista(); };
   window.onbeforeunload = () => sujo ? true : undefined;
 
@@ -253,7 +279,8 @@ function pintarCatalogo(cat, mpOk) {
     try {
       const r = await adm('painelSalvarCatalogo', {
         mpToken: $('#tok').value.trim(), removerToken: remover,
-        catalogo: { parcelas: Number($('#parc').value), valorExtraPadrao: $('#vext').value, produtos: prods.map(x => Object.assign({}, x, { preco: numBR(x.preco), fotos: Number(x.fotos) || 0 })) },
+        catalogo: { provedor: $('#prov').value, infiniteTag: $('#itag').value.trim().replace(/^[$@]+/, ''), parcelasSemJuros: Number($('#sjur').value),
+          parcelas: Number($('#parc').value), valorExtraPadrao: $('#vext').value, produtos: prods.map(x => Object.assign({}, x, { preco: numBR(x.preco), fotos: Number(x.fotos) || 0 })) },
       });
       sujo = false; window.onbeforeunload = null; toast('Catálogo salvo'); pintarCatalogo(r.catalogo, r.mpConfigurado);
     } catch (e) { toast(e.message); b.disabled = false; b.textContent = 'Salvar alterações'; }
@@ -265,13 +292,15 @@ function blocoPedidoAdm(p) {
   const o = p.pedido;
   if (!o || (!o.itens.length && !(o.extras && o.extras.subtotal))) return '';
   const st = { pago: ['ok', 'Pago' + (o.pagoEm ? ' em ' + dataCurta(o.pagoEm) : '')], aguardando: ['alerta', 'Aguardando pagamento'], processando: ['ouro', 'Pagamento em análise'],
-    erro_link: ['alerta', 'Link não foi gerado'], sem_link: ['alerta', 'Sem Mercado Pago: combine por fora'], sem_valor: ['', ''] }[o.status] || ['', o.status];
+    erro_link: ['alerta', 'Link não foi gerado'], sem_link: ['alerta', 'Sem pagamento online: combine por fora'], sem_valor: ['', ''] }[o.status] || ['', o.status];
   return `<div class="pd-caixa pd-adm"><div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><span class="cap">Pedido</span><span class="espaco"></span><span class="estado"><span class="ponto ${st[0]}"></span>${esc(st[1])}</span></div>
     ${o.itens.map(i => `<div class="pd-linha"><span>${i.qtd}× ${esc(i.nome)}${i.fotos.length ? `<small>Fotos: ${i.fotos.map(f => esc(String(f.n).replace(/\.[^.]+$/, ''))).join(', ')}</small>` : ''}${i.texto ? `<small>Texto: “${esc(i.texto)}”</small>` : ''}</span><b>${brl(i.subtotal)}</b></div>`).join('')}
     ${o.extras && o.extras.subtotal ? `<div class="pd-linha"><span>${o.extras.qtd} ${o.extras.qtd === 1 ? 'foto extra' : 'fotos extras'}<small>${brl(o.extras.valorUnit)} cada</small></span><b>${brl(o.extras.subtotal)}</b></div>` : ''}
     <div class="pd-total"><span>Total</span><b>${brl(o.total)}</b></div>
     ${o.pagoAntes ? `<div class="pd-linha"><span>Já pago antes</span><b>− ${brl(o.pagoAntes)}</b></div><div class="pd-total"><span>A pagar</span><b>${brl(o.aPagar)}</b></div>` : ''}
     ${o.status !== 'pago' && o.status !== 'sem_valor' ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
-      <button class="btn btn-linha btn-sm" data-vp>${ic('refresh')} Verificar pagamento</button>
-      ${o.link ? `<button class="btn btn-linha btn-sm" data-cl="${esc(o.link)}">${ic('copy')} Copiar link de pagamento</button>` : ''}</div>` : ''}</div>`;
+      <button class="btn btn-linha btn-sm" data-vp>${ic('refresh')} ${o.link ? 'Verificar pagamento' : 'Gerar link de pagamento'}</button>
+      ${o.link ? `<button class="btn btn-linha btn-sm" data-cl="${esc(o.link)}">${ic('copy')} Copiar link de pagamento</button>` : ''}
+      <button class="btn btn-ghost btn-sm" data-mp>${ic('check')} Marcar como pago</button></div>` : ''}
+    ${o.status === 'pago' && (o.comprovante || o.pagoManual || o.forma) ? `<div class="dica" style="margin:10px 0 0">${o.pagoManual ? 'Marcado como pago por você.' : o.forma === 'pix' ? 'Pago no Pix.' : o.forma ? `Pago no cartão${o.parcelasPagas > 1 ? ` em ${o.parcelasPagas}x` : ''}.` : ''} ${o.comprovante ? `<a href="${esc(o.comprovante)}" target="_blank" rel="noopener">Ver comprovante</a>` : ''}</div>` : ''}</div>`;
 }

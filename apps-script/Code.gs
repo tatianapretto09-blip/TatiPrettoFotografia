@@ -51,6 +51,7 @@ function doPost(e) {
     return json_({ ok: false, erro: 'Pedido inválido.' });
   }
   try {
+    if (!pedido.acao && pedido.order_nsu && (pedido.invoice_slug || pedido.transaction_nsu)) return json_(webhookInfinitePay_(pedido));
     const acao = ACOES[pedido.acao];
     if (!acao) throw new Error('Ação desconhecida.');
     return json_(Object.assign({ ok: true }, acao(pedido) || {}));
@@ -70,7 +71,7 @@ const ACOES = {
   verificarPagamento: req => {
     const g = galeriaCliente_(req);
     if (!(g.pessoas || {})[req.pessoa]) throw new Error('Cadastro não encontrado.');
-    return { pessoa: visaoPessoa_(consultarPagamento_(g.slug, req.pessoa)) };
+    return { pessoa: visaoPessoa_(consultarPagamento_(g.slug, req.pessoa, req.transacao)) };
   },
   entrarPessoa: req => entrarPessoa_(req),
   salvarEscolha: req => salvarEscolha_(req, false),
@@ -159,6 +160,18 @@ const ACOES = {
     admin_(req);
     return { catalogo: catalogo_(carregar_()), mpConfigurado: !!mpToken_() };
   },
+  painelMarcarPago: req => {
+    admin_(req);
+    comTrava_(db => {
+      const x = (galeriaPorSlug_(db, req.slug).pessoas || {})[req.pessoa];
+      if (!x || !x.pedido) throw new Error('Pedido não encontrado.');
+      if (x.pedido.status !== 'pago') {
+        x.pedido.status = 'pago'; x.pedido.pagoEm = Date.now(); x.pedido.pagoManual = true;
+        x.pagoTotal = Math.round((Number(x.pagoTotal || 0) + x.pedido.aPagar) * 100) / 100;
+      }
+    });
+    return { galeria: completa_(galeriaPorSlug_(carregar_(), req.slug)) };
+  },
   painelSalvarCatalogo: req => {
     admin_(req);
     if (req.removerToken) PropertiesService.getScriptProperties().deleteProperty('MP_ACCESS_TOKEN');
@@ -179,6 +192,13 @@ const ACOES = {
         atual.produtos = c.produtos.map(x => limparProduto_(x, antigos));
       }
       if ('parcelas' in c) atual.parcelas = Math.max(1, Math.min(12, Math.floor(Number(c.parcelas) || 1)));
+      if ('parcelasSemJuros' in c) atual.parcelasSemJuros = Math.max(0, Math.min(12, Math.floor(Number(c.parcelasSemJuros) || 0)));
+      if ('provedor' in c) atual.provedor = ['infinitepay', 'mercadopago'].indexOf(c.provedor) >= 0 ? c.provedor : '';
+      if ('infiniteTag' in c) {
+        const tag = String(c.infiniteTag || '').trim().replace(/^[$@]+/, '');
+        if (tag && !/^[\w.-]{2,40}$/.test(tag)) throw new Error('A InfiniteTag deve ter só letras, números, ponto, traço ou sublinhado (sem espaços).');
+        atual.infiniteTag = tag;
+      }
       if ('valorExtraPadrao' in c) atual.valorExtraPadrao = Math.max(0, Math.min(100000, numeroBR_(c.valorExtraPadrao)));
       return atual;
     });
@@ -567,7 +587,8 @@ function visaoPessoa_(p) {
   if (p.pedido) {
     const o = p.pedido;
     v.pedido = { itens: o.itens, extras: o.extras, total: o.total, pagoAntes: o.pagoAntes, aPagar: o.aPagar,
-      status: o.status, link: o.link || '', parcelas: o.parcelas || 1, criadoEm: o.criadoEm, pagoEm: o.pagoEm || null };
+      status: o.status, link: o.link || '', parcelas: o.parcelas || 1, semJuros: o.semJuros || 0, provedor: o.provedor || '',
+      comprovante: o.comprovante || '', criadoEm: o.criadoEm, pagoEm: o.pagoEm || null };
   }
   return v;
 }
@@ -684,7 +705,7 @@ function salvarEscolha_(req, finalizar) {
   });
   let p = resultado.p;
   if (finalizar) {
-    if (p.pedido.status === 'aguardando') p = criarPagamento_(resultado.g, p, resultado.parcelas);
+    if (p.pedido.status === 'aguardando') p = criarPagamento_(resultado.g, p, catalogo_(carregar_()));
     avisarEscolhaFinalizada_(resultado.g, p);
   }
   return { pessoa: visaoPessoa_(p) };
@@ -1050,7 +1071,9 @@ function visaoLoja_(g, db) {
   }));
   const extra = valorExtra_(g, cat);
   if (!produtos.length && !(extra > 0 && g.limite)) return null;
-  return { produtos: produtos, valorExtra: extra, parcelas: cat.parcelas, pagamentoOnline: !!mpToken_() };
+  const prov = provedor_(cat);
+  return { produtos: produtos, valorExtra: extra, pagamentoOnline: !!prov, provedor: prov,
+    parcelas: prov === 'infinitepay' ? 12 : cat.parcelas, semJuros: cat.parcelasSemJuros || 0 };
 }
 
 /** Confere o carrinho que veio do site: só produtos que existem, só fotos que a pessoa escolheu. */
@@ -1097,11 +1120,13 @@ function calcularPedido_(g, p, cat) {
   const pagoAntes = Math.round(Number(p.pagoTotal || 0) * 100) / 100;
   const aPagar = Math.max(0, Math.round((total - pagoAntes) * 100) / 100);
   let status = 'sem_valor';
-  if (aPagar > 0) status = mpToken_() ? 'aguardando' : 'sem_link';
+  const prov = provedor_(cat);
+  if (aPagar > 0) status = prov ? 'aguardando' : 'sem_link';
   else if (total > 0) status = 'pago';
   return {
     itens: itens, extras: extras, total: total, pagoAntes: pagoAntes, aPagar: aPagar, status: status,
-    ref: g.slug + '|' + p.id + '|' + Date.now(), link: '', parcelas: cat.parcelas, criadoEm: Date.now(), pagoEm: null
+    ref: (g.slug + '-' + p.id + '-' + Date.now()).replace(/[^\w-]/g, ''), link: '', provedor: prov,
+    parcelas: prov === 'infinitepay' ? 12 : cat.parcelas, semJuros: cat.parcelasSemJuros || 0, criadoEm: Date.now(), pagoEm: null
   };
 }
 
@@ -1111,8 +1136,8 @@ function textoPedido_(o) {
     (i.fotos.length ? '\n    fotos: ' + i.fotos.map(f => String(f.n).replace(/\.[^.]+$/, '')).join(', ') : '') +
     (i.texto ? '\n    texto: "' + i.texto + '"' : ''));
   if (o.extras.qtd) linhas.push('• ' + o.extras.qtd + ' foto(s) além do pacote — ' + brl_(o.extras.subtotal));
-  const st = { aguardando: 'aguardando pagamento (link do Mercado Pago enviado ao cliente)', sem_link: 'sem link de pagamento — configure o Mercado Pago no painel',
-    erro_link: 'não consegui gerar o link do Mercado Pago', pago: 'pago', processando: 'pagamento em análise', sem_valor: '' }[o.status] || o.status;
+  const st = { aguardando: 'aguardando pagamento (link enviado ao cliente)', sem_link: 'sem link de pagamento — configure a forma de pagamento no painel',
+    erro_link: 'não consegui gerar o link de pagamento', pago: 'pago', processando: 'pagamento em análise', sem_valor: '' }[o.status] || o.status;
   return '\n\nPEDIDO\n' + linhas.join('\n') + '\nTotal: ' + brl_(o.total) +
     (o.pagoAntes ? '\nJá pago antes: ' + brl_(o.pagoAntes) + '\nA pagar agora: ' + brl_(o.aPagar) : '') + (st ? '\nSituação: ' + st : '');
 }
@@ -1121,95 +1146,152 @@ function mpToken_() {
   return PropertiesService.getScriptProperties().getProperty('MP_ACCESS_TOKEN') || '';
 }
 
-/** Cria o link de pagamento (Checkout Pro): Pix ou cartão parcelado. */
-function criarPagamento_(g, p, parcelas) {
+function provedor_(cat) {
+  if (cat.provedor === 'mercadopago') return mpToken_() ? 'mercadopago' : '';
+  if (cat.provedor === 'infinitepay') return cat.infiniteTag ? 'infinitepay' : '';
+  if (cat.infiniteTag) return 'infinitepay';
+  return mpToken_() ? 'mercadopago' : '';
+}
+
+/** Procura o endereço do checkout na resposta (o nome do campo pode variar). */
+function achaUrl_(obj) {
+  if (!obj) return '';
+  if (typeof obj === 'string') return /^https:\/\//.test(obj) ? obj : '';
+  const pref = ['url', 'link', 'checkout_url', 'payment_url', 'invoice_url'];
+  for (let k = 0; k < pref.length; k++) if (typeof obj[pref[k]] === 'string' && /^https:\/\//.test(obj[pref[k]])) return obj[pref[k]];
+  for (const k in obj) { if (typeof obj[k] === 'object') { const u = achaUrl_(obj[k]); if (u) return u; } }
+  return '';
+}
+
+/** Cria o link de pagamento: Pix ou cartão parcelado. */
+function criarPagamento_(g, p, cat) {
   const o = p.pedido;
+  const descricao = o.itens.map(i => i.qtd + 'x ' + i.nome).concat(o.extras.qtd ? [o.extras.qtd + ' foto(s) extra(s)'] : []).join(', ');
+  const volta = SITE_URL + '/?g=' + encodeURIComponent(g.slug) + '&pagamento=1';
   let link = '', status = 'erro_link';
   try {
-    const corpo = {
-      items: [{
-        id: 'pedido', title: (NOME_ESTUDIO + ' • ' + g.cliente).slice(0, 250), quantity: 1, currency_id: 'BRL', unit_price: o.aPagar,
-        description: o.itens.map(i => i.qtd + 'x ' + i.nome).concat(o.extras.qtd ? [o.extras.qtd + ' foto(s) extra(s)'] : []).join(', ').slice(0, 250)
-      }],
-      payer: Object.assign({ name: p.nome }, p.email ? { email: p.email } : {}),
-      external_reference: o.ref,
-      back_urls: {
-        success: SITE_URL + '/?g=' + encodeURIComponent(g.slug) + '&pagamento=1',
-        pending: SITE_URL + '/?g=' + encodeURIComponent(g.slug) + '&pagamento=1',
-        failure: SITE_URL + '/?g=' + encodeURIComponent(g.slug) + '&pagamento=0'
-      },
-      auto_return: 'approved',
-      payment_methods: { installments: Math.max(1, Math.min(12, parcelas || 1)), excluded_payment_types: [{ id: 'ticket' }] },
-      statement_descriptor: 'TATIPRETTO'
-    };
-    const r = UrlFetchApp.fetch('https://api.mercadopago.com/checkout/preferences', {
-      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
-      headers: { Authorization: 'Bearer ' + mpToken_() }, payload: JSON.stringify(corpo)
-    });
-    if (r.getResponseCode() < 300) {
-      const j = JSON.parse(r.getContentText());
-      link = j.init_point || '';
-      if (link) status = 'aguardando';
+    if (o.provedor === 'infinitepay') {
+      const fone = String(p.whats || '').replace(/\D/g, '');
+      const corpo = {
+        handle: cat.infiniteTag,
+        items: [{ quantity: 1, price: Math.round(o.aPagar * 100), description: (NOME_ESTUDIO + ' • ' + g.cliente + (descricao ? ' • ' + descricao : '')).slice(0, 250) }],
+        order_nsu: o.ref, redirect_url: volta, webhook_url: ScriptApp.getService().getUrl(),
+        customer: Object.assign({ name: p.nome }, p.email ? { email: p.email } : {}, fone.length >= 10 ? { phone_number: '+55' + fone.slice(-11) } : {})
+      };
+      const r = UrlFetchApp.fetch('https://api.checkout.infinitepay.io/links', {
+        method: 'post', contentType: 'application/json', muteHttpExceptions: true, payload: JSON.stringify(corpo)
+      });
+      if (r.getResponseCode() < 300) { link = achaUrl_(JSON.parse(r.getContentText())); if (link) status = 'aguardando'; }
+    } else if (o.provedor === 'mercadopago') {
+      const corpo = {
+        items: [{ id: 'pedido', title: (NOME_ESTUDIO + ' • ' + g.cliente).slice(0, 250), quantity: 1, currency_id: 'BRL', unit_price: o.aPagar, description: descricao.slice(0, 250) }],
+        payer: Object.assign({ name: p.nome }, p.email ? { email: p.email } : {}),
+        external_reference: o.ref,
+        back_urls: { success: volta, pending: volta, failure: SITE_URL + '/?g=' + encodeURIComponent(g.slug) + '&pagamento=0' },
+        auto_return: 'approved',
+        payment_methods: { installments: Math.max(1, Math.min(12, cat.parcelas || 1)), excluded_payment_types: [{ id: 'ticket' }] },
+        statement_descriptor: 'TATIPRETTO'
+      };
+      const r = UrlFetchApp.fetch('https://api.mercadopago.com/checkout/preferences', {
+        method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+        headers: { Authorization: 'Bearer ' + mpToken_() }, payload: JSON.stringify(corpo)
+      });
+      if (r.getResponseCode() < 300) { link = JSON.parse(r.getContentText()).init_point || ''; if (link) status = 'aguardando'; }
     }
   } catch (e) { /* fica erro_link; a Tati pode gerar de novo pelo painel */ }
   return comTrava_(db => {
-    const real = galeriaPorSlug_(db, g.slug);
-    const pp = real.pessoas[p.id];
+    const pp = galeriaPorSlug_(db, g.slug).pessoas[p.id];
     if (pp && pp.pedido && pp.pedido.ref === o.ref) { pp.pedido.link = link; pp.pedido.status = status; }
     return pp || p;
   });
 }
 
-/** Pergunta ao Mercado Pago se o pedido foi pago. */
-function consultarPagamento_(slug, pessoaId) {
+/** Pergunta à empresa de pagamento se o pedido foi pago. transacao = dados que a InfinitePay manda na volta. */
+function consultarPagamento_(slug, pessoaId, transacao) {
   const db = carregar_();
+  const cat = catalogo_(db);
   const g = galeriaPorSlug_(db, slug);
   const p = (g.pessoas || {})[pessoaId];
   if (!p) throw new Error('Cadastro não encontrado.');
   const o = p.pedido;
   if (!o || ['aguardando', 'processando', 'erro_link', 'sem_link'].indexOf(o.status) < 0) return p;
-  if (!mpToken_()) return p;
-  if (o.status === 'erro_link' || o.status === 'sem_link') {
-    o.status = 'aguardando';
-    comTrava_(dbx => { const x = galeriaPorSlug_(dbx, slug).pessoas[pessoaId]; if (x && x.pedido && x.pedido.ref === o.ref) x.pedido.status = 'aguardando'; });
-    return criarPagamento_(g, p, catalogo_(db).parcelas);
+  // sem link (falhou ou não havia forma de pagamento): tenta gerar agora
+  if (o.status === 'erro_link' || o.status === 'sem_link' || !o.link) {
+    const prov = provedor_(cat);
+    if (!prov) return p;
+    comTrava_(dbx => { const x = galeriaPorSlug_(dbx, slug).pessoas[pessoaId]; if (x && x.pedido && x.pedido.ref === o.ref) { x.pedido.status = 'aguardando'; x.pedido.provedor = prov; } });
+    o.provedor = prov;
+    return criarPagamento_(g, p, cat);
   }
-  const r = UrlFetchApp.fetch('https://api.mercadopago.com/v1/payments/search?sort=date_created&criteria=desc&external_reference=' + encodeURIComponent(o.ref), {
-    headers: { Authorization: 'Bearer ' + mpToken_() }, muteHttpExceptions: true
-  });
-  if (r.getResponseCode() !== 200) return p;
-  const res = (JSON.parse(r.getContentText()).results || []);
-  let novo = o.status;
-  if (res.some(x => x.status === 'approved')) novo = 'pago';
-  else if (res.some(x => x.status === 'in_process' || x.status === 'pending' || x.status === 'authorized')) novo = 'processando';
-  if (novo === o.status) return p;
+  let novo = o.status, extra = {};
+  if (o.provedor === 'infinitepay') {
+    const t = transacao || {};
+    const fatura = String(t.slug || t.invoice_slug || o.ipFatura || ''), trans = String(t.transaction_nsu || o.ipTransacao || '');
+    if ((t.order_nsu && String(t.order_nsu) !== o.ref) || !fatura || !trans || !cat.infiniteTag) return p;
+    extra = { ipFatura: fatura, ipTransacao: trans };
+    const r = UrlFetchApp.fetch('https://api.checkout.infinitepay.io/payment_check', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      payload: JSON.stringify({ handle: cat.infiniteTag, order_nsu: o.ref, transaction_nsu: trans, slug: fatura })
+    });
+    if (r.getResponseCode() === 200) {
+      const j = JSON.parse(r.getContentText());
+      if (j.success && j.paid) { novo = 'pago'; extra.forma = j.capture_method || ''; extra.parcelasPagas = j.installments || 1; extra.valorPago = (j.paid_amount || j.amount || 0) / 100; }
+    }
+    if (t.receipt_url && /^https:\/\//.test(String(t.receipt_url))) extra.comprovante = String(t.receipt_url);
+  } else if (o.provedor === 'mercadopago' || (!o.provedor && mpToken_())) {
+    if (!mpToken_()) return p;
+    const r = UrlFetchApp.fetch('https://api.mercadopago.com/v1/payments/search?sort=date_created&criteria=desc&external_reference=' + encodeURIComponent(o.ref), {
+      headers: { Authorization: 'Bearer ' + mpToken_() }, muteHttpExceptions: true
+    });
+    if (r.getResponseCode() !== 200) return p;
+    const res = (JSON.parse(r.getContentText()).results || []);
+    if (res.some(x => x.status === 'approved')) novo = 'pago';
+    else if (res.some(x => x.status === 'in_process' || x.status === 'pending' || x.status === 'authorized')) novo = 'processando';
+  } else return p;
+  if (novo === o.status && !Object.keys(extra).length) return p;
   const atual = comTrava_(dbx => {
     const x = galeriaPorSlug_(dbx, slug).pessoas[pessoaId];
     if (!x || !x.pedido || x.pedido.ref !== o.ref || x.pedido.status === 'pago') return x;
+    Object.assign(x.pedido, extra);
     x.pedido.status = novo;
     if (novo === 'pago') { x.pedido.pagoEm = Date.now(); x.pagoTotal = Math.round((Number(x.pagoTotal || 0) + x.pedido.aPagar) * 100) / 100; }
     return x;
   });
-  if (novo === 'pago') {
+  if (novo === 'pago' && o.status !== 'pago') {
     try {
       MailApp.sendEmail(Session.getEffectiveUser().getEmail(), 'Pagamento confirmado • ' + p.nome + ' • ' + g.cliente,
-        p.nome + ' pagou ' + brl_(o.aPagar) + ' pelo Mercado Pago (galeria ' + g.cliente + ').' + textoPedido_(atual.pedido) +
+        p.nome + ' pagou ' + brl_(o.aPagar) + ' (galeria ' + g.cliente + ').' + textoPedido_(atual.pedido) +
         '\n\nVer no painel: ' + SITE_URL + '/?painel');
     } catch (e) { /* opcional */ }
   }
   return atual;
 }
 
+/** Aviso automático da InfinitePay (não é assinado, então sempre confirmamos com payment_check). */
+function webhookInfinitePay_(d) {
+  const db = carregar_();
+  const ref = String(d.order_nsu || '');
+  let achou = null;
+  Object.keys(db.galerias).forEach(slug => {
+    const g = db.galerias[slug];
+    Object.keys(g.pessoas || {}).forEach(pid => { const o = g.pessoas[pid].pedido; if (o && o.ref === ref) achou = [slug, pid]; });
+  });
+  if (!achou) return { ok: false };
+  consultarPagamento_(achou[0], achou[1], { order_nsu: ref, slug: d.invoice_slug || d.slug, transaction_nsu: d.transaction_nsu, receipt_url: d.receipt_url });
+  return { ok: true };
+}
+
 /** Roda junto com a verificação automática: confere pedidos esperando pagamento (até 7 dias). */
 function verificarPagamentosPendentes_() {
-  if (!mpToken_()) return;
   const db = carregar_();
+  if (!provedor_(catalogo_(db))) return;
   let feitos = 0;
   Object.keys(db.galerias).forEach(slug => {
     const g = db.galerias[slug];
     Object.keys(g.pessoas || {}).forEach(pid => {
       const o = g.pessoas[pid].pedido;
       if (feitos >= 25 || !o || (o.status !== 'aguardando' && o.status !== 'processando') || !o.link) return;
+      if (o.provedor === 'infinitepay' && !o.ipTransacao) return;
       if (Date.now() - o.criadoEm > 7 * 24 * 3600 * 1000) return;
       feitos++;
       try { consultarPagamento_(slug, pid); } catch (e) { /* ignora */ }

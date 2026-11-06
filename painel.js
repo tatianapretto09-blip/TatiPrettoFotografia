@@ -313,8 +313,14 @@ function pintarEditor(g, nova) {
           const ng = (await adm('painelVerificarPagamento', { slug: g.slug, pessoa: p.id })).galeria;
           const st = ng.pessoas[p.id].pedido.status;
           pintarEditor(ng); $(`.pessoa[data-p="${CSS.escape(p.id)}"]`).classList.add('aberta');
-          toast(st === 'pago' ? 'Pagamento confirmado!' : st === 'processando' ? 'Pagamento em análise no Mercado Pago' : 'Ainda não foi pago');
+          toast(st === 'pago' ? 'Pagamento confirmado!' : st === 'processando' ? 'Pagamento em análise' : ng.pessoas[p.id].pedido.link ? 'Ainda não aparece como pago' : 'Não consegui gerar o link. Confira a forma de pagamento em Produtos e pagamento');
         } catch (e) { toast(e.message); vp.disabled = false; }
+      };
+      const mpg = $('[data-mp]', el); if (mpg) mpg.onclick = async () => {
+        if (!(await confirmar('Marcar como pago?', `Use quando ${esc(p.nome)} pagou por fora (Pix direto, dinheiro) ou quando você já viu o pagamento no app.`, 'Marcar como pago'))) return;
+        if (!(await antesDeRecarregar())) return;
+        try { pintarEditor((await adm('painelMarcarPago', { slug: g.slug, pessoa: p.id })).galeria); $(`.pessoa[data-p="${CSS.escape(p.id)}"]`).classList.add('aberta'); toast('Marcado como pago'); }
+        catch (e) { toast(e.message); }
       };
       $$('[data-cl]', el).forEach(b => b.onclick = () => copiar(b.dataset.cl));
       $('[data-exclui]', el).onclick = async () => {

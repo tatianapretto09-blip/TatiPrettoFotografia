@@ -611,7 +611,7 @@ function telaSelecao() {
       <p>${n} ${n === 1 ? 'foto escolhida' : 'fotos escolhidas'}. Depois de enviar, a escolha fica fechada.</p>${aviso}
       <div class="lista-esc">${ids.map(f => `<div class="it"><img src="${esc(foto(f.id, 200))}" alt=""><div><b>Foto ${numero(f.id)}</b><div>${escolha[f.id] ? '“' + esc(escolha[f.id]) + '”' : 'Sem comentário'}</div></div></div>`).join('')}</div>
       ${conta.total > 0 ? `<div class="pd-caixa"><div class="cap" style="margin-bottom:10px">Seu pedido</div>${linhasPedido(conta)}<div class="pd-total"><span>Total</span><b>${brl(conta.total)}</b></div>
-        <div class="dica" style="margin:8px 0 0">${pagaOnline ? `Depois de enviar, você paga com segurança pelo Mercado Pago: ${textoParcelas(g.loja.parcelas)}.` : 'A Tati vai te enviar a forma de pagamento.'}</div></div>` : ''}
+        <div class="dica" style="margin:8px 0 0">${pagaOnline ? `Depois de enviar, você paga com segurança pela ${nomeProvedor(g.loja.provedor)}: ${textoParcelas(g.loja.parcelas, g.loja.semJuros)}.` : 'A Tati vai te enviar a forma de pagamento.'}</div></div>` : ''}
       ${loja ? `<button class="btn btn-ghost btn-sm" data-loja style="padding-left:0">${ic('plus')} ${carrinho.length ? 'Mudar produtos' : 'Ver produtos'}</button>` : ''}
       <div class="erro" id="errf"></div>
       <div class="janela-acoes"><button class="btn btn-linha" data-n>Voltar</button><button class="btn btn-ouro" data-s>${pagaOnline ? `Enviar e pagar ${brl(conta.total)}` : 'Enviar minha escolha'}</button></div>`, { largura: 560 });
@@ -629,8 +629,8 @@ function telaSelecao() {
           abrirJanela(`<div class="orn" style="margin-top:0">✦</div><h3 style="text-align:center">Escolha <em class="ouro">enviada</em></h3>
             <p style="text-align:center">A Tati recebeu suas ${n} fotos. Agora falta só o pagamento do pedido.</p>
             <div class="pd-caixa">${linhasPedido(o)}<div class="pd-total"><span>Total</span><b>${brl(o.aPagar)}</b></div></div>
-            <a class="btn btn-ouro" style="width:100%;margin-top:6px" href="${esc(o.link)}">${ic('lock')} Pagar agora • ${textoParcelas(o.parcelas)}</a>
-            <p class="dica" style="text-align:center;margin-top:12px">Você vai para o site seguro do Mercado Pago e volta para cá no final.</p>
+            <a class="btn btn-ouro" style="width:100%;margin-top:6px" href="${esc(o.link)}">${ic('lock')} Pagar agora</a>
+            <p class="dica" style="text-align:center;margin-top:12px">${textoParcelas(o.parcelas, o.semJuros)}. Você vai para o site seguro da ${nomeProvedor(o.provedor)} e volta para cá no final.</p>
             <div class="janela-acoes" style="justify-content:center"><button class="btn btn-ghost btn-sm" onclick="fecharJanela()">Pagar depois</button></div>`, { largura: 520 });
         } else {
           abrirJanela(`<div class="orn" style="margin-top:0">✦</div><h3 style="text-align:center">Escolha <em class="ouro">enviada</em></h3><p style="text-align:center">A Tati recebeu suas ${n} fotos${Object.values(escolha).some(Boolean) ? ' e seus comentários' : ''}${o && o.total ? ` e seu pedido de ${brl(o.total)}` : ''}. Agora é com ela!</p>${o && (o.status === 'sem_link' || o.status === 'erro_link') ? '<p class="dica" style="text-align:center">Ela vai te enviar a forma de pagamento.</p>' : ''}<div class="janela-acoes" style="justify-content:center"><button class="btn btn-ouro" onclick="fecharJanela()">Fechar</button></div>`);
